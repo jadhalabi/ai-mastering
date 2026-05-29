@@ -1,0 +1,111 @@
+import { NextRequest, NextResponse } from 'next/server'
+import { writeFile, mkdir, unlink } from 'fs/promises'
+import { join } from 'path'
+import { execSync } from 'child_process'
+import { existsSync } from 'fs'
+
+const TMP = join(process.cwd(), 'tmp_audio')
+
+const PLATFORM_LUFS: Record<string, number> = {
+  spotify: -14,
+  apple_music: -16,
+  youtube: -14,
+  soundcloud: -11,
+  tidal: -14,
+}
+
+async function saveTmp(file: File, name: string): Promise<string> {
+  await mkdir(TMP, { recursive: true })
+  const bytes = await file.arrayBuffer()
+  const path = join(TMP, name)
+  await writeFile(path, Buffer.from(bytes))
+  return path
+}
+
+const PYTHON = join(process.cwd(), '.venv/bin/python3')
+
+function runPython(cmd: string): string {
+  return execSync(`"${PYTHON}" ${cmd}`, { cwd: process.cwd(), timeout: 120_000 }).toString()
+}
+
+export async function POST(req: NextRequest) {
+  const form = await req.formData()
+  const mode = form.get('mode') as string
+  const yourTrackFile = form.get('your_track') as File | null
+  const referenceFile = form.get('reference_track') as File | null
+  const description = form.get('description') as string | null
+  const platformPreset = form.get('platform_preset') as string | null
+
+  const inputPaths: string[] = []
+
+  try {
+    await mkdir(TMP, { recursive: true })
+
+    if (mode === 'describe') {
+      return NextResponse.json({
+        your_track: {},
+        mastered: { lufs: -14.0, true_peak: -1.0 },
+        notes: ['Text description mode — connect to audio output in a future update.'],
+      })
+    }
+
+    if (!yourTrackFile) {
+      return NextResponse.json({ error: 'No track uploaded' }, { status: 400 })
+    }
+
+    const ts = Date.now()
+    const yourPath = await saveTmp(yourTrackFile, `input_${ts}_${yourTrackFile.name}`)
+    inputPaths.push(yourPath)
+
+    let refPath: string | null = null
+    if (referenceFile) {
+      refPath = await saveTmp(referenceFile, `ref_${ts}_${referenceFile.name}`)
+      inputPaths.push(refPath)
+    }
+
+    const outputId = `mastered_${ts}.wav`
+    const outputPath = join(TMP, outputId)
+
+    // Analyze
+    const analyzeCmd = refPath
+      ? `analyze.py "${yourPath}" "${refPath}"`
+      : `analyze.py "${yourPath}"`
+    const analysis = JSON.parse(runPython(analyzeCmd))
+
+    // Build processing params
+    const diff = analysis.diff || {}
+    const gainDb: number = diff.lufs_diff ?? 0
+    const eqBands = diff.eq_bands ? JSON.stringify(diff.eq_bands) : '{}'
+    const compress = diff.compress ? JSON.stringify(diff.compress) : '{}'
+    const stereoScale: number = diff.stereo_scale ?? 1.0
+    const targetLufs = platformPreset
+      ? (PLATFORM_LUFS[platformPreset] ?? -14)
+      : refPath
+      ? (analysis.reference?.lufs ?? -14)
+      : -14
+
+    // Process
+    runPython(`process.py "${yourPath}" --output "${outputPath}" --gain ${gainDb.toFixed(2)} --eq-bands '${eqBands}' --compress '${compress}' --target-lufs ${targetLufs} --true-peak -1.0 --stereo-scale ${stereoScale.toFixed(4)}`)
+
+    // Verify
+    const verifyCmd = refPath
+      ? `analyze.py "${outputPath}" "${refPath}"`
+      : `analyze.py "${outputPath}"`
+    const verify = JSON.parse(runPython(verifyCmd))
+
+    return NextResponse.json({
+      your_track: analysis.your_track,
+      reference: analysis.reference ?? null,
+      mastered: verify.your_track,
+      notes: verify.notes ?? [],
+      download_id: outputId,
+    })
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : 'Processing failed'
+    return NextResponse.json({ error: msg }, { status: 500 })
+  } finally {
+    for (const p of inputPaths) {
+      if (existsSync(p)) unlink(p).catch(() => {})
+    }
+  }
+}
