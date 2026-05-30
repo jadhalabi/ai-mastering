@@ -1,130 +1,106 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { writeFile, mkdir, unlink } from 'fs/promises'
+import { mkdir, writeFile, unlink } from 'fs/promises'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { existsSync } from 'fs'
-import { runPython } from '@/lib/python'
+import { randomUUID } from 'crypto'
 import { createClient } from '@/lib/supabase/server'
+import { analyzeAudio, processAudio } from '@/lib/audio'
+
+export const maxDuration = 60
 
 const TMP = join(tmpdir(), 'ai-mastering')
 
 const PLATFORM_LUFS: Record<string, number> = {
-  spotify: -14,
-  apple_music: -16,
-  youtube: -14,
-  soundcloud: -11,
-  tidal: -14,
+  spotify: -14, apple_music: -16, youtube: -14, soundcloud: -11, tidal: -14,
 }
 
-function sanitizeName(name: string): string {
-  return name.replace(/[^a-zA-Z0-9._-]/g, '_')
-}
-
-async function saveTmp(file: File, name: string): Promise<string> {
-  await mkdir(TMP, { recursive: true })
-  const bytes = await file.arrayBuffer()
-  const path = join(TMP, name)
-  await writeFile(path, Buffer.from(bytes))
-  return path
+async function downloadFromStorage(publicUrl: string, destPath: string) {
+  const res = await fetch(publicUrl)
+  if (!res.ok) throw new Error('Could not download uploaded file')
+  await writeFile(destPath, Buffer.from(await res.arrayBuffer()))
 }
 
 export async function POST(req: NextRequest) {
-  const inputPaths: string[] = []
-
+  const tmpPaths: string[] = []
   try {
-    const form = await req.formData()
-    const mode = form.get('mode') as string
-    const yourTrackFile = form.get('your_track') as File | null
-    const referenceFile = form.get('reference_track') as File | null
-    const description = form.get('description') as string | null
-    const platformPreset = form.get('platform_preset') as string | null
-
     await mkdir(TMP, { recursive: true })
+    const body = await req.json()
+    const { input_url, reference_url, mode, platform_preset } = body
 
-    if (mode === 'describe') {
-      return NextResponse.json({
-        your_track: {},
-        mastered: { lufs: -14.0, true_peak: -1.0 },
-        notes: ['Text description mode — connect to audio output in a future update.'],
-      })
-    }
+    if (!input_url) return NextResponse.json({ error: 'No track provided' }, { status: 400 })
 
-    if (!yourTrackFile) {
-      return NextResponse.json({ error: 'No track uploaded' }, { status: 400 })
-    }
-
-    const ts = Date.now()
-    const yourPath = await saveTmp(yourTrackFile, `input_${ts}_${sanitizeName(yourTrackFile.name)}`)
-    inputPaths.push(yourPath)
-
-    let refPath: string | null = null
-    if (referenceFile) {
-      refPath = await saveTmp(referenceFile, `ref_${ts}_${sanitizeName(referenceFile.name)}`)
-      inputPaths.push(refPath)
-    }
-
-    const outputId = `mastered_${ts}.wav`
-    const outputPath = join(TMP, outputId)
-
-    // Analyze
-    const analyzeArgs = refPath ? [yourPath, refPath] : [yourPath]
-    const analysis = JSON.parse(await runPython('analyze.py', analyzeArgs))
-
-    // Build processing params
-    const diff = analysis.diff || {}
-    const gainDb: number = diff.lufs_diff ?? 0
-    const eqBands = diff.eq_bands ? JSON.stringify(diff.eq_bands) : '{}'
-    const compress = diff.compress ? JSON.stringify(diff.compress) : '{}'
-    const stereoScale: number = diff.stereo_scale ?? 1.0
-    const targetLufs = platformPreset
-      ? (PLATFORM_LUFS[platformPreset] ?? -14)
-      : refPath
-      ? (analysis.reference?.lufs ?? -14)
-      : -14
-
-    // Process — returns mastered stats directly (no separate verify pass needed)
-    const processOut = JSON.parse(await runPython('process.py', [
-      yourPath,
-      '--output', outputPath,
-      '--gain', gainDb.toFixed(2),
-      '--eq-bands', eqBands,
-      '--compress', compress,
-      '--target-lufs', String(targetLufs),
-      '--true-peak', '-1.0',
-      '--stereo-scale', stereoScale.toFixed(4),
-    ]))
-
-    const mastered = processOut.mastered ?? { lufs: targetLufs, true_peak: -1.0, waveform: [] }
-
-    // Save to DB if the user is authenticated
     const supabase = await createClient()
     const { data: { user } } = await supabase.auth.getUser()
+
+    // Download input file from Supabase public URL
+    const inputExt = input_url.split('?')[0].split('.').pop() || 'wav'
+    const inputTmp = join(TMP, `input_${randomUUID()}.${inputExt}`)
+    await downloadFromStorage(input_url, inputTmp)
+    tmpPaths.push(inputTmp)
+
+    let refTmp: string | null = null
+    if (reference_url) {
+      const refExt = reference_url.split('?')[0].split('.').pop() || 'wav'
+      refTmp = join(TMP, `ref_${randomUUID()}.${refExt}`)
+      await downloadFromStorage(reference_url, refTmp)
+      tmpPaths.push(refTmp)
+    }
+
+    // Analyze
+    const yourTrack = await analyzeAudio(inputTmp)
+    const reference = refTmp ? await analyzeAudio(refTmp) : null
+
+    // Determine target LUFS
+    const targetLufs = platform_preset
+      ? (PLATFORM_LUFS[platform_preset] ?? -14)
+      : reference ? reference.lufs : -14
+
+    // Process
+    const outputId = `result_${randomUUID()}.wav`
+    const outputTmp = join(TMP, outputId)
+    const mastered = await processAudio(inputTmp, outputTmp, targetLufs)
+    tmpPaths.push(outputTmp)
+
+    // Upload result to Supabase Storage
+    const resultPath = user ? `${user.id}/${outputId}` : `temp/${outputId}`
+    const outputBuffer = require('fs').readFileSync(outputTmp)
+    const { error: uploadErr } = await supabase.storage
+      .from('audio')
+      .upload(resultPath, outputBuffer, { contentType: 'audio/wav', upsert: true })
+
+    if (uploadErr) throw new Error('Could not store mastered file: ' + uploadErr.message)
+
+    const { data: { publicUrl: downloadUrl } } = supabase.storage.from('audio').getPublicUrl(resultPath)
+
+    // Save job to DB if authenticated
     if (user) {
+      const fileName = (input_url.split('/').pop() ?? 'track').split('?')[0]
       await supabase.from('masters').insert({
         user_id: user.id,
         user_email: user.email,
-        file_name: yourTrackFile.name,
-        mode,
-        platform_preset: platformPreset ?? null,
-        input_lufs: analysis.your_track?.lufs ?? null,
-        output_lufs: mastered.lufs ?? null,
-        output_peak: mastered.true_peak ?? null,
-        waveform: mastered.waveform ?? [],
+        file_name: fileName,
+        mode: mode || 'track_only',
+        platform_preset: platform_preset || null,
+        input_lufs: yourTrack.lufs,
+        output_lufs: mastered.lufs,
+        output_peak: mastered.true_peak,
+        waveform: mastered.waveform,
       })
     }
 
     return NextResponse.json({
-      your_track: analysis.your_track,
-      reference: analysis.reference ?? null,
+      your_track: yourTrack,
+      reference,
       mastered,
-      notes: analysis.notes ?? [],
-      download_id: outputId,
+      notes: [],
+      download_url: downloadUrl,
     })
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : 'Processing failed'
     return NextResponse.json({ error: msg }, { status: 500 })
   } finally {
-    for (const p of inputPaths) {
+    for (const p of tmpPaths) {
       if (existsSync(p)) unlink(p).catch(() => {})
     }
   }

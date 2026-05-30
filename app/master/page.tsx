@@ -4,6 +4,7 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useSearchParams } from 'next/navigation'
 import { Suspense } from 'react'
+import { createClient } from '@/lib/supabase/client'
 
 type Mode = 'both' | 'track_only' | 'describe'
 
@@ -19,7 +20,7 @@ interface AnalysisResult {
   reference?: TrackStats
   mastered: TrackStats
   notes: string[]
-  download_id?: string
+  download_url?: string
 }
 
 const GENRE_PRESETS = [
@@ -142,12 +143,12 @@ function BeforeAfterPlayer({
   originalFile,
   beforeWaveform,
   afterWaveform,
-  downloadId,
+  downloadUrl,
 }: {
   originalFile: File
   beforeWaveform: number[]
   afterWaveform: number[]
-  downloadId: string
+  downloadUrl: string
 }) {
   const beforeRef = useRef<HTMLDivElement>(null)
   const beforeWs = useRef<import('wavesurfer.js').default | null>(null)
@@ -212,7 +213,7 @@ function BeforeAfterPlayer({
           </div>
           <WaveformBarsSimple data={afterWaveform} accent={true} />
           <a
-            href={`/api/download?id=${downloadId}`}
+            href={downloadUrl}
             download="mastered.wav"
             className="flex items-center gap-2.5 px-4 py-2 rounded-lg border border-[#DEB04A]/20 text-[#DEB04A]/60 text-xs hover:text-[#DEB04A]/90 hover:border-[#DEB04A]/40 transition-all w-full justify-center"
           >
@@ -246,12 +247,12 @@ function ResultsPanel({
   return (
     <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
       {/* Before / After */}
-      {results.download_id && (
+      {results.download_url && (
         <BeforeAfterPlayer
           originalFile={originalFile}
           beforeWaveform={beforeWaveform}
           afterWaveform={afterWaveform}
-          downloadId={results.download_id}
+          downloadUrl={results.download_url}
         />
       )}
 
@@ -294,9 +295,9 @@ function ResultsPanel({
 
       {/* Actions */}
       <div className="flex gap-3">
-        {results.download_id && (
+        {results.download_url && (
           <a
-            href={`/api/download?id=${results.download_id}`}
+            href={results.download_url}
             download={`mastered_${originalFile.name.replace(/\.[^.]+$/, '')}.wav`}
             className="relative flex-1 py-4 bg-[#DEB04A] text-black font-semibold rounded-xl hover:bg-[#E8C060] transition-colors overflow-hidden group text-sm text-center block"
           >
@@ -331,7 +332,7 @@ function MasterPageInner() {
     (mode === 'describe' && description.trim().length > 0)
 
   async function handleMaster() {
-    if (!canSubmit) return
+    if (!canSubmit || !yourTrack) return
     setLoading(true)
     setError(null)
     setResults(null)
@@ -341,23 +342,50 @@ function MasterPageInner() {
       setStepIndex((i) => Math.min(i + 1, PROCESSING_STEPS.length - 2))
     }, 2500)
 
-    const formData = new FormData()
-    formData.append('mode', mode)
-    if (yourTrack) formData.append('your_track', yourTrack)
-    if (referenceTrack) formData.append('reference_track', referenceTrack)
-    if (description) formData.append('description', description)
-    if (genrePreset) formData.append('genre_preset', genrePreset)
-    if (platformPreset) formData.append('platform_preset', platformPreset)
-
     try {
-      const res = await fetch('/api/master', { method: 'POST', body: formData })
+      const supabase = createClient()
+      const { data: { user } } = await supabase.auth.getUser()
+      const folder = user ? user.id : 'temp'
+      const uuid = crypto.randomUUID()
+
+      // Upload input to Supabase Storage (bypasses Vercel's 4.5MB limit)
+      const inputStoragePath = `${folder}/input_${uuid}_${yourTrack.name}`
+      const { error: uploadErr } = await supabase.storage
+        .from('audio')
+        .upload(inputStoragePath, yourTrack, { upsert: true })
+      if (uploadErr) throw new Error('Upload failed: ' + uploadErr.message)
+
+      const { data: { publicUrl: inputUrl } } = supabase.storage.from('audio').getPublicUrl(inputStoragePath)
+
+      let referenceUrl: string | null = null
+      if (referenceTrack) {
+        const refPath = `${folder}/ref_${uuid}_${referenceTrack.name}`
+        const { error: refErr } = await supabase.storage
+          .from('audio')
+          .upload(refPath, referenceTrack, { upsert: true })
+        if (!refErr) {
+          referenceUrl = supabase.storage.from('audio').getPublicUrl(refPath).data.publicUrl
+        }
+      }
+
+      // Call API with public URLs (no size limit)
+      const res = await fetch('/api/master', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          input_url: inputUrl,
+          reference_url: referenceUrl,
+          mode,
+          platform_preset: platformPreset,
+          genre_preset: genrePreset,
+        }),
+      })
+
       clearInterval(interval)
       setStepIndex(PROCESSING_STEPS.length - 1)
-      if (!res.ok) {
-        const data = await res.json()
-        throw new Error(data.error || 'Processing failed')
-      }
+
       const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Processing failed')
       setResults(data)
     } catch (e: unknown) {
       clearInterval(interval)

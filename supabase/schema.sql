@@ -1,5 +1,22 @@
--- MasterAI: masters table
+-- MasterAI: full schema
 -- Run this once in your Supabase dashboard → SQL Editor
+
+-- ── Storage bucket for audio files ──────────────────────────────────────────
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('audio', 'audio', true)
+ON CONFLICT (id) DO NOTHING;
+
+-- Anyone can upload to temp/ (unauthenticated users)
+CREATE POLICY IF NOT EXISTS "anon upload temp"
+  ON storage.objects FOR INSERT TO anon
+  WITH CHECK (bucket_id = 'audio' AND (storage.foldername(name))[1] = 'temp');
+
+-- Authenticated users can upload to their own folder
+CREATE POLICY IF NOT EXISTS "auth upload own"
+  ON storage.objects FOR INSERT TO authenticated
+  WITH CHECK (bucket_id = 'audio' AND (storage.foldername(name))[1] IN (auth.uid()::text, 'temp'));
+
+-- ── Masters table ────────────────────────────────────────────────────────────
 
 create table if not exists public.masters (
   id            uuid default gen_random_uuid() primary key,
