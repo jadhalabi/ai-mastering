@@ -4,7 +4,6 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useSearchParams } from 'next/navigation'
 import { Suspense } from 'react'
-import { createClient } from '@/lib/supabase/client'
 
 type Mode = 'both' | 'track_only' | 'describe'
 
@@ -343,29 +342,33 @@ function MasterPageInner() {
     }, 2500)
 
     try {
-      const supabase = createClient()
-      const { data: { user } } = await supabase.auth.getUser()
-      const folder = user ? user.id : 'temp'
-      const uuid = crypto.randomUUID()
+      // Get signed upload URLs from server (bypasses Vercel's 4.5MB limit + no RLS needed)
+      async function getUploadUrl(file: File, role: string) {
+        const res = await fetch('/api/upload-url', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filename: file.name, role }),
+        })
+        if (!res.ok) throw new Error('Could not get upload URL')
+        return res.json() as Promise<{ signedUrl: string; path: string; publicUrl: string }>
+      }
 
-      // Upload input to Supabase Storage (bypasses Vercel's 4.5MB limit)
-      const inputStoragePath = `${folder}/input_${uuid}_${yourTrack.name}`
-      const { error: uploadErr } = await supabase.storage
-        .from('audio')
-        .upload(inputStoragePath, yourTrack, { upsert: true })
-      if (uploadErr) throw new Error('Upload failed: ' + uploadErr.message)
+      async function uploadToStorage(file: File, role: string) {
+        const { signedUrl, publicUrl } = await getUploadUrl(file, role)
+        const uploadRes = await fetch(signedUrl, {
+          method: 'PUT',
+          body: file,
+          headers: { 'Content-Type': file.type || 'audio/wav' },
+        })
+        if (!uploadRes.ok) throw new Error('Upload failed')
+        return publicUrl
+      }
 
-      const { data: { publicUrl: inputUrl } } = supabase.storage.from('audio').getPublicUrl(inputStoragePath)
+      const inputUrl = await uploadToStorage(yourTrack, 'input')
 
       let referenceUrl: string | null = null
       if (referenceTrack) {
-        const refPath = `${folder}/ref_${uuid}_${referenceTrack.name}`
-        const { error: refErr } = await supabase.storage
-          .from('audio')
-          .upload(refPath, referenceTrack, { upsert: true })
-        if (!refErr) {
-          referenceUrl = supabase.storage.from('audio').getPublicUrl(refPath).data.publicUrl
-        }
+        referenceUrl = await uploadToStorage(referenceTrack, 'ref').catch(() => null)
       }
 
       // Call API with public URLs (no size limit)

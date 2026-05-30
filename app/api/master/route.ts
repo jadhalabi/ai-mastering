@@ -5,6 +5,7 @@ import { tmpdir } from 'os'
 import { existsSync } from 'fs'
 import { randomUUID } from 'crypto'
 import { createClient } from '@/lib/supabase/server'
+import { createAdminClient } from '@/lib/supabase/admin'
 import { analyzeAudio, processAudio } from '@/lib/audio'
 
 export const maxDuration = 60
@@ -31,6 +32,7 @@ export async function POST(req: NextRequest) {
     if (!input_url) return NextResponse.json({ error: 'No track provided' }, { status: 400 })
 
     const supabase = await createClient()
+    const admin = createAdminClient()
     const { data: { user } } = await supabase.auth.getUser()
 
     // Download input file from Supabase public URL
@@ -65,13 +67,13 @@ export async function POST(req: NextRequest) {
     // Upload result to Supabase Storage
     const resultPath = user ? `${user.id}/${outputId}` : `temp/${outputId}`
     const outputBuffer = require('fs').readFileSync(outputTmp)
-    const { error: uploadErr } = await supabase.storage
+    const { error: uploadErr } = await admin.storage
       .from('audio')
       .upload(resultPath, outputBuffer, { contentType: 'audio/wav', upsert: true })
 
     if (uploadErr) throw new Error('Could not store mastered file: ' + uploadErr.message)
 
-    const { data: { publicUrl: downloadUrl } } = supabase.storage.from('audio').getPublicUrl(resultPath)
+    const { data: { publicUrl: downloadUrl } } = admin.storage.from('audio').getPublicUrl(resultPath)
 
     // Save job to DB if authenticated
     if (user) {
