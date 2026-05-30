@@ -171,7 +171,7 @@ export default function Home() {
               AI Mastering Studio
             </div>
 
-            <h1 className="font-heading text-6xl md:text-8xl font-bold leading-[0.95] tracking-tight mb-6">
+            <h1 className="font-heading text-5xl md:text-8xl font-bold leading-[0.95] tracking-tight mb-6">
               Your Track.<br />
               <span className="text-[#DEB04A]">Mastered by AI.</span>
             </h1>
@@ -196,7 +196,7 @@ export default function Home() {
               </Link>
             </div>
 
-            <div className="flex gap-10 justify-center">
+            <div className="flex flex-wrap gap-8 justify-center">
               {[['10,000+', 'Tracks Mastered'], ['Trusted by', 'Independent Artists'], ['Sounds Like', 'a $200 Master']].map(([v, l]) => (
                 <div key={l} className="text-center">
                   <p className="font-heading text-[#DEB04A] font-bold text-xl">{v}</p>
