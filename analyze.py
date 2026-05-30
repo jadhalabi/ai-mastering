@@ -20,6 +20,14 @@ import librosa
 import soundfile as sf
 import pyloudnorm as pyln
 
+def waveform_data(y_mono, num_points: int = 200) -> list:
+    chunk = max(1, len(y_mono) // num_points)
+    peaks = [float(np.max(np.abs(y_mono[i * chunk:(i + 1) * chunk])))
+             for i in range(num_points) if i * chunk < len(y_mono)]
+    max_val = max(peaks) if peaks else 1.0
+    return [round(v / max_val, 4) for v in peaks] if max_val > 0 else peaks
+
+
 def analyze_file(path: str) -> dict:
     y, sr = librosa.load(path, sr=None, mono=False)
 
@@ -96,6 +104,7 @@ def analyze_file(path: str) -> dict:
         "stereo_width": round(stereo_width, 4),
         "spectral_centroid": round(spectral_centroid, 1),
         "eq_bands": bands,
+        "waveform": waveform_data(y_mono),
     }
 
 def compute_diff(src: dict, ref: dict) -> dict:

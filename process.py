@@ -16,6 +16,7 @@ def check_deps():
 
 check_deps()
 
+import os
 import numpy as np
 import librosa
 import soundfile as sf
@@ -86,10 +87,37 @@ def process(
     processed = np.clip(processed, -peak_linear, peak_linear)
 
     # Write 24-bit WAV
-    out = processed.T  # (samples, channels)
+    processed = np.nan_to_num(processed, nan=0.0, posinf=0.999, neginf=-0.999)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    out = np.ascontiguousarray(processed.T)  # (samples, channels)
     sf.write(output_path, out, sr, subtype='PCM_24')
 
-    print(json.dumps({"status": "ok", "output": output_path}))
+    # Compute output stats while audio is still in memory (avoids a re-analyze pass)
+    out_mono = librosa.to_mono(processed)
+    out_meter = pyln.Meter(sr)
+    try:
+        out_lufs = round(float(out_meter.integrated_loudness(out_mono)), 2)
+    except Exception:
+        out_lufs = round(target_lufs, 2)
+    out_peak_linear = float(np.max(np.abs(processed)))
+    out_peak_db = round(20 * np.log10(out_peak_linear + 1e-10), 2)
+
+    # Waveform for display (200 normalized amplitude points)
+    chunk = max(1, len(out_mono) // 200)
+    peaks = [float(np.max(np.abs(out_mono[i * chunk:(i + 1) * chunk])))
+             for i in range(200) if i * chunk < len(out_mono)]
+    max_val = max(peaks) if peaks else 1.0
+    waveform = [round(v / max_val, 4) for v in peaks] if max_val > 0 else peaks
+
+    print(json.dumps({
+        "status": "ok",
+        "output": output_path,
+        "mastered": {
+            "lufs": out_lufs,
+            "true_peak": out_peak_db,
+            "waveform": waveform,
+        },
+    }))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

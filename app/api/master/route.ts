@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { writeFile, mkdir, unlink } from 'fs/promises'
 import { join } from 'path'
-import { execSync } from 'child_process'
+import { tmpdir } from 'os'
 import { existsSync } from 'fs'
+import { runPython } from '@/lib/python'
+import { createClient } from '@/lib/supabase/server'
 
-const TMP = join(process.cwd(), 'tmp_audio')
+const TMP = join(tmpdir(), 'ai-mastering')
 
 const PLATFORM_LUFS: Record<string, number> = {
   spotify: -14,
@@ -12,6 +14,10 @@ const PLATFORM_LUFS: Record<string, number> = {
   youtube: -14,
   soundcloud: -11,
   tidal: -14,
+}
+
+function sanitizeName(name: string): string {
+  return name.replace(/[^a-zA-Z0-9._-]/g, '_')
 }
 
 async function saveTmp(file: File, name: string): Promise<string> {
@@ -22,23 +28,17 @@ async function saveTmp(file: File, name: string): Promise<string> {
   return path
 }
 
-const PYTHON = join(process.cwd(), '.venv/bin/python3')
-
-function runPython(cmd: string): string {
-  return execSync(`"${PYTHON}" ${cmd}`, { cwd: process.cwd(), timeout: 120_000 }).toString()
-}
-
 export async function POST(req: NextRequest) {
-  const form = await req.formData()
-  const mode = form.get('mode') as string
-  const yourTrackFile = form.get('your_track') as File | null
-  const referenceFile = form.get('reference_track') as File | null
-  const description = form.get('description') as string | null
-  const platformPreset = form.get('platform_preset') as string | null
-
   const inputPaths: string[] = []
 
   try {
+    const form = await req.formData()
+    const mode = form.get('mode') as string
+    const yourTrackFile = form.get('your_track') as File | null
+    const referenceFile = form.get('reference_track') as File | null
+    const description = form.get('description') as string | null
+    const platformPreset = form.get('platform_preset') as string | null
+
     await mkdir(TMP, { recursive: true })
 
     if (mode === 'describe') {
@@ -54,12 +54,12 @@ export async function POST(req: NextRequest) {
     }
 
     const ts = Date.now()
-    const yourPath = await saveTmp(yourTrackFile, `input_${ts}_${yourTrackFile.name}`)
+    const yourPath = await saveTmp(yourTrackFile, `input_${ts}_${sanitizeName(yourTrackFile.name)}`)
     inputPaths.push(yourPath)
 
     let refPath: string | null = null
     if (referenceFile) {
-      refPath = await saveTmp(referenceFile, `ref_${ts}_${referenceFile.name}`)
+      refPath = await saveTmp(referenceFile, `ref_${ts}_${sanitizeName(referenceFile.name)}`)
       inputPaths.push(refPath)
     }
 
@@ -67,10 +67,8 @@ export async function POST(req: NextRequest) {
     const outputPath = join(TMP, outputId)
 
     // Analyze
-    const analyzeCmd = refPath
-      ? `analyze.py "${yourPath}" "${refPath}"`
-      : `analyze.py "${yourPath}"`
-    const analysis = JSON.parse(runPython(analyzeCmd))
+    const analyzeArgs = refPath ? [yourPath, refPath] : [yourPath]
+    const analysis = JSON.parse(await runPython('analyze.py', analyzeArgs))
 
     // Build processing params
     const diff = analysis.diff || {}
@@ -84,20 +82,42 @@ export async function POST(req: NextRequest) {
       ? (analysis.reference?.lufs ?? -14)
       : -14
 
-    // Process
-    runPython(`process.py "${yourPath}" --output "${outputPath}" --gain ${gainDb.toFixed(2)} --eq-bands '${eqBands}' --compress '${compress}' --target-lufs ${targetLufs} --true-peak -1.0 --stereo-scale ${stereoScale.toFixed(4)}`)
+    // Process — returns mastered stats directly (no separate verify pass needed)
+    const processOut = JSON.parse(await runPython('process.py', [
+      yourPath,
+      '--output', outputPath,
+      '--gain', gainDb.toFixed(2),
+      '--eq-bands', eqBands,
+      '--compress', compress,
+      '--target-lufs', String(targetLufs),
+      '--true-peak', '-1.0',
+      '--stereo-scale', stereoScale.toFixed(4),
+    ]))
 
-    // Verify
-    const verifyCmd = refPath
-      ? `analyze.py "${outputPath}" "${refPath}"`
-      : `analyze.py "${outputPath}"`
-    const verify = JSON.parse(runPython(verifyCmd))
+    const mastered = processOut.mastered ?? { lufs: targetLufs, true_peak: -1.0, waveform: [] }
+
+    // Save to DB if the user is authenticated
+    const supabase = await createClient()
+    const { data: { user } } = await supabase.auth.getUser()
+    if (user) {
+      await supabase.from('masters').insert({
+        user_id: user.id,
+        user_email: user.email,
+        file_name: yourTrackFile.name,
+        mode,
+        platform_preset: platformPreset ?? null,
+        input_lufs: analysis.your_track?.lufs ?? null,
+        output_lufs: mastered.lufs ?? null,
+        output_peak: mastered.true_peak ?? null,
+        waveform: mastered.waveform ?? [],
+      })
+    }
 
     return NextResponse.json({
       your_track: analysis.your_track,
       reference: analysis.reference ?? null,
-      mastered: verify.your_track,
-      notes: verify.notes ?? [],
+      mastered,
+      notes: analysis.notes ?? [],
       download_id: outputId,
     })
   } catch (e: unknown) {
