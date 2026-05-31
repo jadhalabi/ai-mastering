@@ -78,7 +78,8 @@ export async function POST(req: NextRequest) {
     // Save job to DB if authenticated
     if (user) {
       const fileName = (input_url.split('/').pop() ?? 'track').split('?')[0]
-      await supabase.from('masters').insert({
+      // Use admin client to bypass RLS — user is already verified above
+      await admin.from('masters').insert({
         user_id: user.id,
         user_email: user.email,
         file_name: fileName,

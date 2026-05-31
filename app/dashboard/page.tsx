@@ -3,7 +3,6 @@
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { motion } from 'framer-motion'
-import { createClient } from '@/lib/supabase/client'
 import MasteringHistoryTable, { MasterRecord } from '@/components/MasteringHistoryTable'
 
 const PLATFORM_LABELS: Record<string, string> = {
@@ -40,18 +39,21 @@ function toRecord(m: Master): MasterRecord {
 
 export default function DashboardPage() {
   const [masters, setMasters] = useState<Master[]>([])
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading]   = useState(true)
+  const [error, setError]       = useState<string | null>(null)
 
   useEffect(() => {
-    const supabase = createClient()
-    supabase
-      .from('masters')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .then(({ data }) => {
-        setMasters(data ?? [])
-        setLoading(false)
+    fetch('/api/masters')
+      .then(r => r.json())
+      .then(data => {
+        if (Array.isArray(data)) {
+          setMasters(data)
+        } else {
+          setError(data.error ?? 'Failed to load')
+        }
       })
+      .catch(() => setError('Network error'))
+      .finally(() => setLoading(false))
   }, [])
 
   return (
@@ -62,7 +64,7 @@ export default function DashboardPage() {
       <div className="relative z-10 max-w-6xl mx-auto">
         <div className="flex items-center justify-between mb-10">
           <div>
-            <p className="text-[#DEB04A] tracking-widest text-xs uppercase mb-2">Dashboard</p>
+            <p className="text-purple-400 tracking-widest text-xs uppercase mb-2">Dashboard</p>
             <h1 className="text-4xl font-bold">Your Masters</h1>
           </div>
           <Link href="/master" className="px-6 py-3 bg-[#DEB04A] text-black font-heading font-semibold rounded-xl hover:bg-[#E8C060] transition-colors text-sm shadow-[0_0_20px_rgba(222,176,74,0.2)]">
@@ -75,6 +77,10 @@ export default function DashboardPage() {
             {[1, 2, 3].map(i => (
               <div key={i} className="bg-[#0F0E1C] border border-white/8 rounded-xl p-6 h-14 animate-pulse" />
             ))}
+          </div>
+        ) : error ? (
+          <div className="text-center py-16">
+            <p className="text-red-400/80 text-sm">{error}</p>
           </div>
         ) : masters.length === 0 ? (
           <div className="text-center py-32">
