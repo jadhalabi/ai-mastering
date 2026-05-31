@@ -7,7 +7,7 @@ export interface AudioStats {
   lufs: number;
   truePeak: number;
   dynamicRange: number;
-  bands: { name: string; points: number[] }[];
+  bands?: { name: string; points: number[] }[];
 }
 
 const DEFAULT_BEFORE: AudioStats = {
@@ -103,27 +103,29 @@ export default function BeforeAfterCard({ before, after }: { before?: AudioStats
         <StatRow label="Dynamic Range"     before={b.dynamicRange} after={a.dynamicRange} unit="dB"   lowerIsBetter />
       </div>
 
-      <div>
-        <p className="text-xs text-gray-500 uppercase tracking-widest mb-3">Frequency Bands</p>
-        <div className="grid grid-cols-2 gap-3">
-          {b.bands.map((band, i) => {
-            const afterBand = a.bands[i];
-            const avgBefore = band.points.reduce((s, v) => s + v, 0) / band.points.length;
-            const avgAfter  = afterBand.points.reduce((s, v) => s + v, 0) / afterBand.points.length;
-            const improved  = avgAfter > avgBefore;
-            return (
-              <div key={band.name} className="rounded-lg p-3 flex items-center justify-between"
-                style={{ background: 'rgba(255,255,255,0.03)', border: `1px solid ${improved ? 'rgba(34,197,94,0.15)' : 'rgba(255,255,255,0.05)'}` }}>
-                <div>
-                  <p className="text-xs text-gray-400 mb-1">{band.name}</p>
-                  <Sparkline points={afterBand.points} improved={improved} />
+      {b.bands && b.bands.length > 0 && a.bands && a.bands.length > 0 && (
+        <div>
+          <p className="text-xs text-gray-500 uppercase tracking-widest mb-3">Frequency Bands</p>
+          <div className="grid grid-cols-2 gap-3">
+            {b.bands.map((band, i) => {
+              const afterBand = a.bands![i];
+              const avgBefore = band.points.reduce((s, v) => s + v, 0) / band.points.length;
+              const avgAfter  = afterBand.points.reduce((s, v) => s + v, 0) / afterBand.points.length;
+              const improved  = avgAfter > avgBefore;
+              return (
+                <div key={band.name} className="rounded-lg p-3 flex items-center justify-between"
+                  style={{ background: 'rgba(255,255,255,0.03)', border: `1px solid ${improved ? 'rgba(34,197,94,0.15)' : 'rgba(255,255,255,0.05)'}` }}>
+                  <div>
+                    <p className="text-xs text-gray-400 mb-1">{band.name}</p>
+                    <Sparkline points={afterBand.points} improved={improved} />
+                  </div>
+                  {improved && <TrendingUp size={14} className="text-green-400 self-start mt-1" />}
                 </div>
-                {improved && <TrendingUp size={14} className="text-green-400 self-start mt-1" />}
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

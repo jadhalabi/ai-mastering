@@ -4,12 +4,15 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useSearchParams } from 'next/navigation'
 import { Suspense } from 'react'
+import ProcessingStatus from '@/components/ProcessingStatus'
+import BeforeAfterCard, { AudioStats } from '@/components/BeforeAfterCard'
 
 type Mode = 'both' | 'track_only' | 'describe'
 
 interface TrackStats {
   lufs?: number
   true_peak?: number
+  lra?: number
   waveform?: number[]
   [key: string]: number | string | number[] | undefined
 }
@@ -34,13 +37,19 @@ const PLATFORM_PRESETS = [
   { label: 'Tidal', key: 'tidal', lufs: '-14 LUFS' },
 ]
 
-const PROCESSING_STEPS = [
-  'Analyzing your track...',
-  'Comparing to reference...',
-  'Applying EQ...',
-  'Limiting & finalizing...',
-  'Done',
-]
+// stepIndex (0-4) → ProcessingStatus currentStep (0-5)
+function toProcessingStep(stepIndex: number) {
+  if (stepIndex >= 4) return 5
+  return stepIndex
+}
+
+function buildAudioStats(track: TrackStats): AudioStats {
+  return {
+    lufs: track.lufs ?? -23,
+    truePeak: track.true_peak ?? -1,
+    dynamicRange: track.lra ?? 5,
+  }
+}
 
 function WaveformIcon() {
   return (
@@ -183,10 +192,9 @@ function BeforeAfterPlayer({
   return (
     <div className="rounded-xl border border-white/8 overflow-hidden">
       <div className="bg-[#0F0E1C] px-4 py-3 border-b border-white/8">
-        <p className="text-white/70 text-sm font-medium tracking-wide">Before / After</p>
+        <p className="text-white/70 text-sm font-medium tracking-wide">Listen: Before / After</p>
       </div>
       <div className="grid grid-cols-2 divide-x divide-white/8">
-        {/* Before */}
         <div className="p-5 space-y-4">
           <div className="flex items-center gap-2">
             <div className="w-1.5 h-1.5 rounded-full bg-white/30" />
@@ -204,7 +212,6 @@ function BeforeAfterPlayer({
           </button>
         </div>
 
-        {/* After */}
         <div className="p-5 space-y-4">
           <div className="flex items-center gap-2">
             <div className="w-1.5 h-1.5 rounded-full bg-[#DEB04A]" />
@@ -233,19 +240,18 @@ function ResultsPanel({
   originalFile: File
   onReset: () => void
 }) {
-  const metrics = [
-    { key: 'lufs', label: 'LUFS' },
-    { key: 'true_peak', label: 'True Peak' },
-    { key: 'lra', label: 'LRA' },
-    { key: 'stereo_width', label: 'Stereo Width' },
-    { key: 'spectral_centroid', label: 'Spectral Centroid' },
-  ]
   const beforeWaveform = (results.your_track.waveform as number[]) ?? []
   const afterWaveform  = (results.mastered.waveform  as number[]) ?? []
 
+  const beforeStats = buildAudioStats(results.your_track)
+  const afterStats  = buildAudioStats(results.mastered)
+
   return (
     <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
-      {/* Before / After */}
+      {/* Stats comparison */}
+      <BeforeAfterCard before={beforeStats} after={afterStats} />
+
+      {/* Audio player */}
       {results.download_url && (
         <BeforeAfterPlayer
           originalFile={originalFile}
@@ -255,34 +261,7 @@ function ResultsPanel({
         />
       )}
 
-      {/* Comparison table */}
-      <div className="rounded-xl border border-white/8 overflow-hidden">
-        <div className="bg-[#0F0E1C] px-4 py-3 border-b border-white/8">
-          <p className="text-white/70 text-sm font-medium">Analysis Results</p>
-        </div>
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-white/5">
-              <th className="text-left text-white/40 font-normal px-4 py-2">Metric</th>
-              <th className="text-right text-white/40 font-normal px-4 py-2">Your Track</th>
-              {results.reference && <th className="text-right text-white/40 font-normal px-4 py-2">Reference</th>}
-              <th className="text-right text-[#DEB04A]/70 font-normal px-4 py-2">Mastered</th>
-            </tr>
-          </thead>
-          <tbody>
-            {metrics.map(({ key, label }) => (
-              <tr key={key} className="border-b border-[#111] last:border-0">
-                <td className="text-white/40 px-4 py-2">{label}</td>
-                <td className="text-right text-white/60 px-4 py-2 font-mono text-xs">{results.your_track[key] ?? '—'}</td>
-                {results.reference && <td className="text-right text-white/60 px-4 py-2 font-mono text-xs">{results.reference[key] ?? '—'}</td>}
-                <td className="text-right text-[#DEB04A] px-4 py-2 font-mono text-xs">{results.mastered[key] ?? '—'}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {/* Notes */}
+      {/* Processing notes */}
       {results.notes?.length > 0 && (
         <div className="bg-[#0F0E1C] border border-white/8 rounded-xl px-4 py-4">
           <p className="text-white/40 text-xs mb-2 uppercase tracking-widest">Processing Notes</p>
@@ -338,11 +317,10 @@ function MasterPageInner() {
     setStepIndex(0)
 
     const interval = setInterval(() => {
-      setStepIndex((i) => Math.min(i + 1, PROCESSING_STEPS.length - 2))
+      setStepIndex((i) => Math.min(i + 1, 3))
     }, 2500)
 
     try {
-      // Get signed upload URLs from server (bypasses Vercel's 4.5MB limit + no RLS needed)
       async function getUploadUrl(file: File, role: string) {
         const res = await fetch('/api/upload-url', {
           method: 'POST',
@@ -371,7 +349,6 @@ function MasterPageInner() {
         referenceUrl = await uploadToStorage(referenceTrack, 'ref').catch(() => null)
       }
 
-      // Call API with public URLs (no size limit)
       const res = await fetch('/api/master', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -385,7 +362,7 @@ function MasterPageInner() {
       })
 
       clearInterval(interval)
-      setStepIndex(PROCESSING_STEPS.length - 1)
+      setStepIndex(4)
 
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Processing failed')
@@ -425,7 +402,6 @@ function MasterPageInner() {
 
   return (
     <div className="max-w-3xl mx-auto px-6 py-12 pt-28">
-      {/* grain */}
       <div className="pointer-events-none fixed inset-0 opacity-[0.035] z-0" style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")`, backgroundSize: '128px 128px' }} />
 
       <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
@@ -484,18 +460,25 @@ function MasterPageInner() {
           </div>
         </div>
 
+        {/* Processing steps — shown while loading */}
+        <AnimatePresence>
+          {loading && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              className="mb-6 overflow-hidden"
+            >
+              <ProcessingStatus currentStep={toProcessingStep(stepIndex)} orientation="horizontal" />
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {/* Master button */}
         <button onClick={handleMaster} disabled={!canSubmit || loading}
           className={`relative w-full py-4 rounded-xl text-base font-semibold transition-all overflow-hidden group ${canSubmit && !loading ? 'bg-[#DEB04A] text-black hover:bg-[#E8C060] cursor-pointer' : 'bg-white/[0.04] text-white/20 cursor-not-allowed'}`}>
           {canSubmit && !loading && <div className="absolute inset-0 -translate-x-full group-hover:translate-x-full transition-transform duration-700 bg-gradient-to-r from-transparent via-white/20 to-transparent skew-x-12" />}
-          {loading ? (
-            <div className="space-y-2">
-              <p className="text-black/80 text-sm">{PROCESSING_STEPS[stepIndex]}</p>
-              <div className="w-48 mx-auto bg-black/20 rounded-full h-1">
-                <div className="bg-black/60 h-1 rounded-full transition-all duration-500" style={{ width: `${((stepIndex + 1) / PROCESSING_STEPS.length) * 100}%` }} />
-              </div>
-            </div>
-          ) : 'Master Track'}
+          <span className="relative z-10">{loading ? 'Processing…' : 'Master Track'}</span>
         </button>
 
         {error && <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="mt-4 text-red-400/80 text-sm">{error}</motion.p>}

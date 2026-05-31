@@ -7,7 +7,7 @@ export interface MasterRecord {
   id: string;
   trackName: string;
   date: string;
-  genre: string;
+  genre: string;       // used for platform label
   lufsBefor: number;
   lufsAfter: number;
   referenceUsed: boolean;
@@ -77,7 +77,7 @@ export default function MasteringHistoryTable({ records }: { records?: MasterRec
             <tr>
               <Th label="Track Name" col="trackName" />
               <Th label="Date"       col="date"      />
-              <Th label="Genre"      col="genre"     />
+              <Th label="Platform"   col="genre"     />
               <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-widest text-gray-500 whitespace-nowrap">LUFS</th>
               <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-widest text-gray-500 whitespace-nowrap">Reference</th>
               <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-widest text-gray-500">Download</th>
