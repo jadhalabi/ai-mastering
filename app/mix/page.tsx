@@ -35,7 +35,7 @@ interface MixAnalysis {
 interface MixResult {
   before: MixAnalysis
   after: MixAnalysis
-  download_id: string
+  download_url: string
   fixes_applied: string[]
 }
 
@@ -292,19 +292,33 @@ function GoldButton({ onClick, disabled, children }: {
 
 export default function MixPage() {
   const [track, setTrack] = useState<File | null>(null)
+  const [uploadedUrl, setUploadedUrl] = useState<string | null>(null)
   const [phase, setPhase] = useState<Phase>('idle')
   const [analysis, setAnalysis] = useState<MixAnalysis | null>(null)
   const [result, setResult] = useState<MixResult | null>(null)
-  const [downloadId, setDownloadId] = useState<string | null>(null)
+  const [downloadUrl, setDownloadUrl] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   function handleNewFile(f: File) {
     setTrack(f)
+    setUploadedUrl(null)
     setPhase('idle')
     setAnalysis(null)
     setResult(null)
-    setDownloadId(null)
+    setDownloadUrl(null)
     setError(null)
+  }
+
+  async function uploadToStorage(file: File): Promise<string> {
+    const urlRes = await fetch('/api/upload-url', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: file.name, role: 'mix' }),
+    })
+    const { signedUrl, publicUrl, error: urlErr } = await urlRes.json()
+    if (urlErr) throw new Error(urlErr)
+    await fetch(signedUrl, { method: 'PUT', body: file, headers: { 'Content-Type': file.type || 'audio/mpeg' } })
+    return publicUrl
   }
 
   async function handleAnalyze() {
@@ -312,10 +326,13 @@ export default function MixPage() {
     setPhase('analyzing')
     setError(null)
     try {
-      const fd = new FormData()
-      fd.append('action', 'analyze')
-      fd.append('track', track)
-      const res = await fetch('/api/mix', { method: 'POST', body: fd })
+      const url = uploadedUrl ?? await uploadToStorage(track)
+      setUploadedUrl(url)
+      const res = await fetch('/api/mix', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input_url: url, action: 'analyze' }),
+      })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Analysis failed')
       setAnalysis(data.analysis)
@@ -327,17 +344,18 @@ export default function MixPage() {
   }
 
   async function handleFix() {
-    if (!track) return
+    if (!uploadedUrl) return
     setPhase('fixing')
     setError(null)
     try {
-      const fd = new FormData()
-      fd.append('action', 'fix')
-      fd.append('track', track)
-      const res = await fetch('/api/mix', { method: 'POST', body: fd })
+      const res = await fetch('/api/mix', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input_url: uploadedUrl, action: 'fix' }),
+      })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Processing failed')
-      setDownloadId(data.download_id)
+      setDownloadUrl(data.download_url)
       setResult(data)
       setPhase('fixed')
     } catch (e) {
@@ -348,10 +366,11 @@ export default function MixPage() {
 
   function handleReset() {
     setTrack(null)
+    setUploadedUrl(null)
     setPhase('idle')
     setAnalysis(null)
     setResult(null)
-    setDownloadId(null)
+    setDownloadUrl(null)
     setError(null)
   }
 
@@ -477,7 +496,7 @@ export default function MixPage() {
         )}
 
         {/* Fixed results */}
-        {phase === 'fixed' && result && track && downloadId && (
+        {phase === 'fixed' && result && track && downloadUrl && (
           <motion.div initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className="space-y-4">
 
             <div>
@@ -540,7 +559,7 @@ export default function MixPage() {
 
             {/* Download + Master */}
             <a
-              href={`/api/download?id=${downloadId}`}
+              href={downloadUrl}
               download="mix_prepared.wav"
               className="w-full py-4 rounded-2xl font-bold text-base bg-[#DEB04A] text-black hover:brightness-110 transition-all duration-300 flex items-center justify-center relative overflow-hidden group"
             >
